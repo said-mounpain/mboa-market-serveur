@@ -173,4 +173,4 @@ Méthode : **symptôme → journal → cause → correction → vérification**.
 
 ## Auteur
 
-Saïd mounpain [suivez mois sur linkedIn] (www.linkedin.com/in/mounpainsaid) — formation « Devenir Ingénieur DevOps » de Runbookly, atelier du 8 novembre 2026.
+Saïd mounpain www.linkedin.com/in/mounpainsaid — formation « Devenir Ingénieur DevOps » de Runbookly, atelier du 8 novembre 2026.
