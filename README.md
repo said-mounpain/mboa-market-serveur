@@ -35,8 +35,7 @@ flowchart LR
 
 - Seul Nginx écoute sur le réseau (port 80). L'API n'écoute que sur `127.0.0.1` : on ne la joint qu'à travers Nginx.
 - systemd démarre l'API avec la machine, et la relance si elle plante (`Restart=on-failure`).
-- <à compléter : un choix de cette architecture qui te semble important, et pourquoi>
-
+- Les requêtes vers l'API passent par Nginx ce qui la sécurise des attaques externes.
 ## La sécurité
 
 - L'API tourne sous le compte système `stock`, sans shell ni sudo : si elle est piratée, l'attaquant n'a presque aucun droit.
@@ -95,24 +94,83 @@ curl http://localhost/api/stock        # le stock, en JSON, à travers Nginx
 systemctl status mboa-stock            # active (running)
 sudo tail -n 3 /var/log/nginx/mboamarket.access.log
 ```
+```text
+HTTP/1.1 200 OK
+Server: nginx/1.24.0 (Ubuntu)
+Date: Sat, 14 Nov 2026 18:57:06 GMT
+Content-Type: text/html
+Content-Length: 1974
+Last-Modified: Sat, 14 Nov 2026 15:28:45 GMT
+Connection: keep-alive
+ETag: "6af87e2d-7b6"
+Accept-Ranges: bytes
 
-<à compléter : ce que ces commandes t'ont montré sur ton serveur : les codes HTTP, et une ligne du journal d'accès (celle d'un curl, qui vient de 127.0.0.1 : ne publie pas l'adresse IP d'un visiteur)>
+HTTP/1.1 200 OK
+Server: nginx/1.24.0 (Ubuntu)
+Date: Sat, 14 Nov 2026 18:57:06 GMT
+Content-Type: text/html
+Content-Length: 1310
+Last-Modified: Sat, 14 Nov 2026 15:28:45 GMT
+Connection: keep-alive
+ETag: "6af87e2d-51e"
+Accept-Ranges: bytes
+
+{"version": "novembre", "produits": [{"id": "poivre-penja", "nom": "Poivre de Penja", "stock": 42}, {"id": "cafe-ouest", "nom": "Café de l'Ouest", "stock": 18}, {"id": "miel-oku", "nom": "Miel blanc d'Oku", "stock": 7}, {"id": "sirop-erable", "nom": "Sirop d'érable", "stock": 0}, {"id": "pagne-wax", "nom": "Pagne wax", "stock": 25}]}
+● mboa-stock.service - API du stock de Mboa Market
+     Loaded: loaded (/etc/systemd/system/mboa-stock.service; enabled; preset: e>
+     Active: active (running) since Sat 2026-11-14 17:28:23 CET; 2h 28min ago
+   Main PID: 110141 (python3)
+      Tasks: 1 (limit: 9483)
+     Memory: 9.4M (peak: 13.3M)
+        CPU: 2.494s
+     CGroup: /system.slice/mboa-stock.service
+             └─110141 /usr/bin/python3 /srv/mboamarket/stock/stock.py
+lines 1-9/9 (END)
+127.0.0.1 - - [14/Nov/2026:19:57:06 +0100] "HEAD / HTTP/1.1" 200 0 "-" "curl/8.5.0"
+127.0.0.1 - - [14/Nov/2026:19:57:06 +0100] "HEAD /promo.html HTTP/1.1" 200 0 "-" "curl/8.5.0"
+127.0.0.1 - - [14/Nov/2026:19:57:06 +0100] "GET /api/stock HTTP/1.1" 200 338 "-" "curl/8.5.0"
+
+```
 
 ## L'incident du 8 novembre 2026
 
 Juste après la publication de la version de novembre, la page des promotions répondait **403** et l'API du stock **502**.
 
-- **Le 403** : <à compléter : la cause, en une phrase>
-- **Le 502** : <à compléter : la cause, en une phrase>
+- **Le 403** : l'outil mboa-publier s'exécute en root avec sudo et contient umask 077 (« les fichiers de la livraison restent privés pendant la copie »)
+- **Le 502** :  l'unité systemd mboa-stock.service ne définissait pas STOCK_FICHIER, que la nouvelle version de l'API exige. L'API plantait donc dès son démarrage.
 
 Le diagnostic, la chronologie, la correction et les actions pour que ça ne revienne pas sont dans le [post-mortem](docs/post-mortem-2026-11-08.md).
 
 ## Ce que j'ai appris
 
-- <à compléter>
-- <à compléter>
-- <à compléter>
+
+### 1. Comptes, groupes et permissions
+- Créer un compte avec son groupe (`useradd -m -s /bin/bash -G web nadia`) et préparer un dossier partagé pour une équipe.
+- Le **SGID** (`2775`) fait hériter le groupe aux nouveaux fichiers, mais ne règle pas leurs droits.
+- Le **umask** décide des droits à la création : `0002` pour mon compte, `0022` sous sudo, `077` dans `mboa-publier`, ce qui a causé l'incident.
+- Un service a son propre compte système (`useradd --system`, `nologin`, sans dossier personnel) : c'est le principe du **moindre privilège**.
+
+### 2. Nginx
+- Installer Nginx et vérifier qu'il tourne : `systemctl status`, `ss -tlnp`, `curl -I`.
+- Un `active (running)` ne prouve pas que le service écoute : il faut vérifier le port.
+- Écrire un bloc `server` (racine, journaux séparés), l'activer par un lien symbolique dans `sites-enabled`, puis tester avec `nginx -t` avant le `reload`.
+- Deux `default_server` sur le même port provoquent une erreur de configuration.
+- Seul le processus maître tourne en root ; les workers tournent en `www-data`.
+- Utiliser Nginx comme **reverse proxy** devant l'API (`proxy_pass`).
+
+### 3. systemd
+- Transformer un script lancé à la main en **service** : fichier d'unité, `daemon-reload`, `enable --now`.
+- Prouver que `Restart=on-failure` fonctionne : `kill -9` sur le processus, puis lecture de `journalctl -u`.
+- Les variables d'environnement se déclarent dans l'unité (`Environment=`).
+- Une relance automatique ne répare pas une erreur qui se reproduit à chaque démarrage : systemd finit par abandonner (« Start request repeated too quickly »).
+
+### 4. Diagnostic d'incident
+Méthode : **symptôme → journal → cause → correction → vérification**.
+
+### 5. Documentation
+- Tenir un journal de bord reproductible : chaque commande avec son résultat.
+- Rédiger un **post-mortem sans coupable** : impact, chronologie datée, causes racines, correction, actions de prévention avec responsables.
 
 ## Auteur
 
-<à compléter : ton prénom et ton nom, et le lien vers ton profil LinkedIn si tu en as un> — formation « Devenir Ingénieur DevOps » de Runbookly, atelier du 8 novembre 2026.
+Saïd mounpain [suivez mois sur linkedIn] (www.linkedin.com/in/mounpainsaid) — formation « Devenir Ingénieur DevOps » de Runbookly, atelier du 8 novembre 2026.
